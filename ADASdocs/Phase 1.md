@@ -1,58 +1,48 @@
-### **1. Vehicle Speed Control (Acceleration and Braking)**
+### **1. Wireless Control (PWM Signal)**
 
 #### Components Involved:
 
-- **PWM & DC Motor Driver** (for motor control)
+- **HC-05 Bluetooth** (for wireless communication)
     
-- **Ultrasonic Sensor** (for TTC calculation)
+- **PWM & DC Motor Driver** (H-Bridge for controlling motor)
     
-- **Brake Pedal (GPIO or digital input)**
-    
-- **LCD 16x2** (for displaying speed)
+- **LCD 16x2** (for status display)
     
 
 #### Tasks:
 
-1. **Read Accelerator Pedal Input (ADC)**:
+1. **Bluetooth (HC-05) Communication**:
     
-    - Use the **ADC** driver to read the analog input from the accelerator pedal. This will give you a value that you can map to a PWM duty cycle.
+    - Use the **HC-05 Bluetooth** module to receive PWM commands wirelessly from a smartphone, remote control, or computer.
         
-    - Use **PWM** to control the motor's speed based on the ADC value.
+    - The PWM signal (either duty cycle or direction) will be transmitted via **UART** from the wireless controller to the ATMEGA32A.
+        
+2. **Control Motor via PWM**:
+    
+    - The PWM signal received from the wireless controller will be used to control the speed and direction of the car’s wheels via the **H-Bridge**.
+        
+    - The **PWM & DC Motor Driver** will interpret the PWM signal and adjust the DC motor’s speed and direction.
         
     
     Example:
     
-    - Read the ADC value from the pedal.
+    - A **higher PWM duty cycle** will drive the motor faster.
         
-    - Map the value to the motor's PWM duty cycle (e.g., higher ADC values → faster motor speed).
+    - A **lower PWM duty cycle** will slow the motor down.
         
-2. **Motor Control Using PWM**:
+    - You can also implement **direction control** by using the PWM signal to determine whether the motor should rotate forward or reverse.
+        
+3. **Display PWM/Speed on LCD**:
     
-    - Configure the **PWM** driver to adjust the duty cycle based on the accelerator input.
+    - You can display the **current PWM duty cycle** or **speed** on the LCD for monitoring.
         
-    - Control the **DC Motor** with PWM to change the speed in real-time based on the pedal position.
+    - As the wireless controller adjusts the speed, update the LCD with the current PWM value to give feedback to the user.
         
-3. **Display Speed on LCD**:
+4. **Wireless Transmission**:
     
-    - Once the speed is set via PWM, display the current speed on the **LCD**.
+    - The **HC-05 Bluetooth** will continuously receive commands (either via a smartphone app, computer, or remote) that send PWM values to the ATMEGA32A.
         
-    - You can convert the PWM signal or read an encoder (if available) to display the speed in real-world units (e.g., km/h or m/s).
-        
-4. **Brake Pedal Input (GPIO or digital input)**:
-    
-    - Read the brake pedal status using a **GPIO pin**.
-        
-    - When the brake pedal is pressed, you will decelerate the car by gradually reducing the PWM signal (simulate a smooth stop).
-        
-    - **Mutex/Semaphore Implementation**:
-        
-        - Implement a **mutex** or **binary semaphore** that the brake system can lock to prevent the accelerator from overriding the braking action. When the brake pedal is pressed, lock the mutex to ensure the motor speed decreases to zero.
-            
-5. **Vehicle Dynamics**:
-    
-    - Use a **smooth braking algorithm** to simulate realistic deceleration.
-        
-    - You can calculate the braking force required by monitoring the vehicle's speed and gradually reducing the PWM duty cycle, avoiding a sudden stop.
+    - Depending on the received PWM value, the ATMEGA32A will control the **H-Bridge** to adjust the motor speed and direction.
         
 
 ---
@@ -63,30 +53,28 @@
 
 - **Ultrasonic Sensor** (HC-SR04)
     
-- **PWM & DC Motor Driver** (to apply emergency brake)
-    
 
 #### Tasks:
 
 1. **Measure Distance Using Ultrasonic Sensor**:
     
-    - Use the **Ultrasonic Sensor** driver to measure the distance between the car and obstacles in front of it.
+    - Use the **Ultrasonic Sensor** to continuously monitor the distance in front of the car.
         
-    - Calculate the **Time-To-Collision (TTC)** using the sensor data (distance/time).
+    - Based on the **Time-To-Collision (TTC)**, decide whether the car needs to slow down or stop.
         
 2. **Calculate TTC**:
     
-    - Based on the car's current speed and distance to an obstacle, calculate if the car will collide.
+    - Use the **TTC** formula: `TTC = d_obs / v`, where:
         
-    - Use the formula for **stopping distance**: `d_stop = v^2 / (2 * a)` to check if the car will stop before colliding.
+        - `d_obs` is the current obstacle distance.
+            
+        - `v` is the current speed (calculated from the PWM duty cycle).
+            
+    - If the TTC is too small (i.e., the car will collide soon), trigger an emergency stop.
         
-    - If the TTC is smaller than the time required to stop, activate emergency braking.
-        
-3. **Apply Emergency Braking**:
+3. **Emergency Braking**:
     
-    - Reduce the **PWM duty cycle** gradually from 100% down to 0% to simulate emergency braking.
-        
-    - Use the logic to decelerate smoothly to avoid the sudden stop.
+    - If a collision is imminent, reduce the PWM duty cycle to gradually slow down the car (simulate emergency braking).
         
 
 ---
@@ -97,76 +85,78 @@
 
 - **Photo-Resistor** (for light detection)
     
-- **LCD 16x2** (for status display)
+- **LCD 16x2** (for headlight status display)
     
 
 #### Tasks:
 
 1. **Read Ambient Light Using Photo-Resistor (ADC)**:
     
-    - Use the **ADC** driver to read the value from the photo-resistor.
+    - Use the **ADC** driver to read the value from the **photo-resistor**.
         
-    - Based on the light level, decide whether to turn the headlights on or off.
+    - Based on the ambient light value, decide whether to turn the headlights ON or OFF.
         
-2. **Turn Headlights On/Off**:
+2. **Control Headlights**:
     
-    - If the light level is below a certain threshold, turn on the headlights.
+    - If the light level is low (e.g., in the dark), turn on the headlights.
         
-    - If the light level is above the threshold, turn off the headlights.
+    - If the light level is high (e.g., daylight), turn off the headlights.
         
-    - You can simulate the headlight control using a **GPIO pin** or an **optocoupler** to control a relay.
+    - You can control the headlights using a **GPIO pin** or an **optocoupler** to switch the relay.
         
 3. **Display Headlight Status on LCD**:
     
-    - Update the LCD display with the current status of the headlights (ON or OFF).
+    - Show the **headlight status** (ON/OFF) on the LCD to provide feedback.
         
 
 ---
 
-### **4. Implementing a Watchdog Timer (Safety Feature)**
+### **4. Watchdog Timer (Safety Feature)**
 
 #### Components Involved:
 
-- **Watchdog Timer Driver**
+- **Watchdog Timer** (to ensure system reliability)
     
 
 #### Tasks:
 
 1. **Enable Watchdog Timer**:
     
-    - Use the **Watchdog Timer Driver** to ensure that the system is reset if the software gets stuck or fails to respond.
+    - Use the **Watchdog Timer Driver** to ensure that the system is reset if the main control loop gets stuck or fails to respond.
         
-2. **Periodic Reset**:
+2. **Periodically Reset the Watchdog**:
     
-    - Ensure the main loop or critical tasks regularly "pet" the watchdog by resetting it within the specified timeout.
+    - Ensure that the main loop or critical tasks periodically reset the watchdog timer by "petting" it.
         
-    - If the system does not reset the watchdog within the timeout, it will cause a system reset, ensuring the system remains reliable.
+    - If the system doesn't reset the watchdog, the system will automatically reset, ensuring reliability.
         
 
 ---
 
 ### **Next Steps:**
 
-1. **Setup the development environment**:
+1. **Initialize Bluetooth Communication (HC-05)**:
     
-    - Make sure the required drivers and libraries are correctly linked and initialized in your project.
+    - Set up **USART** communication between the ATMEGA32A and HC-05 Bluetooth module.
         
-2. **Initialize Hardware**:
+    - Establish a communication protocol (e.g., sending PWM duty cycle values) from the wireless controller to the ATMEGA32A.
+        
+2. **Motor Control via PWM**:
     
-    - Initialize the ADC, PWM, UART, GPIO, and other drivers you’ll need.
+    - Implement the logic to receive PWM signals from the HC-05 and use them to control the **H-Bridge**.
         
-3. **Write Main Program Logic**:
+3. **Collision Avoidance**:
     
-    - Implement the vehicle control loop (accelerator/brake, ultrasonic sensor for collision, and headlight control).
+    - Implement the ultrasonic sensor logic to calculate TTC and apply emergency braking if necessary.
         
-    - Write tasks for the **RTOS** or use interrupts for real-time responsiveness.
-        
-4. **Test Each Feature Incrementally**:
+4. **Headlight Control**:
     
-    - Start with testing the motor control, then add the braking functionality, followed by the collision avoidance logic.
+    - Set up the light detection system and control the headlights based on ambient light levels.
         
-    - Test the headlight control and display functionality on the LCD as the final step.
-        
-5. **Final Integration and Testing**:
+5. **Testing**:
     
-    - Once all features are working, integrate them into the main loop, ensuring smooth interaction between acceleration, braking, collision avoidance, and headlight control.
+    - Test each feature individually (Bluetooth control, motor control, ultrasonic sensor, and light control).
+        
+    - Integrate the features and test the entire system to ensure it works as expected.
+        
+---
