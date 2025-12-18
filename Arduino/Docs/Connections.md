@@ -37,11 +37,16 @@ Motors:
 | TRIG    |     D12 |
 | ECHO    |     D11 |
 
-### LCD :
+## LCD Control + Data (4-bit Mode)
 
-|  LCD    | Arduino Uno |
-| ------- | ----------: |
-| VCC     |          5V |
-| GND     |         GND |
-| SDA     |          A4 |
-| SCL     |          A5 |
+| LCD Pin | Arduino Connection |
+|--------|---------------------|
+| RS     | D2                  | 
+| RW     | GND                 | 
+| E      | D7                  | 
+| D0–D3  | Not connected       | 
+| D4     | D8                  | 
+| D5     | D13                 | 
+| D6     | A2                  | 
+| D7     | A3                  | 
+
