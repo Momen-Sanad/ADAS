@@ -8,37 +8,38 @@
 
 #define TWO_PI 6.28318530
 
-// Motor pins
+// Motor pins - FIXED FOR YOUR WIRING
 #define ENA     PB1  // D9 (OC1A)
 #define ENB     PB2  // D10 (OC1B)
 
-#define IN1     PD2  // D2
-#define IN2     PD3  // D3
-#define IN3     PD4  // D4
-#define IN4     PD5  // D5
+#define IN1     PD3  // D3
+#define IN2     PD4  // D4
+#define IN3     PD5  // D5
+#define IN4     PD6  // D6
 
-// Ultrasonic pins
-#define TRIG_PIN PD7 // D7
-#define ECHO_PIN PD6 // D6
+// Ultrasonic pins - FIXED FOR YOUR WIRING
+#define TRIG_PIN PB4 // D12
+#define ECHO_PIN PB3 // D11
 
 // PWM generator parameters
-const unsigned long pwmCycleMs = 2000UL;   // milliseconds per sine cycle
-const uint8_t pwmMin = 0;                  // PWM min 0..255
-const uint8_t pwmMax = 200;                // PWM max (leave headroom)
-const unsigned long sampleIntervalMs = 10UL; // update rate in ms
+const unsigned long pwmCycleMs = 2000UL;
+const uint8_t pwmMin = 0;
+const uint8_t pwmMax = 200;
+const unsigned long sampleIntervalMs = 10UL;
 
-/* LCD Pin Definitions (4-bit) */
-// Control
-#define CTRL_Dir  DDRB
-#define CTRL_Port PORTB
-#define RS_PIN    PB0   // D8
-#define E_pin     PB3   // D11
+/* LCD Pin Definitions (4-bit) - FIXED FOR YOUR WIRING */
+// RS = D2 = PD2
+// E  = D7 = PD7
+#define LCD_RS_PIN    PD2
+#define LCD_E_PIN     PD7
 
-// Data (4-bit) -> A0..A3 (PC0..PC3)
-#define LCD_Data_Dir DDRC
-#define LCD_Data_Port PORTC
-#define LCD_D4 PC0
-#define LCD_D5 PC1
+// Data pins:
+// D4 = D8  = PB0
+// D5 = D13 = PB5
+// D6 = A2  = PC2
+// D7 = A3  = PC3
+#define LCD_D4 PB0
+#define LCD_D5 PB5
 #define LCD_D6 PC2
 #define LCD_D7 PC3
 
@@ -61,29 +62,29 @@ void floatToString(float value, char* str, int precision);
 /* --------------------------------------------------------------------- */
 
 static void lcd_pulse_enable(void) {
-    CTRL_Port |= (1 << E_pin);
+    PORTD |= (1 << LCD_E_PIN);
     _delay_us(1);
-    CTRL_Port &= ~(1 << E_pin);
-    _delay_us(50); // let LCD process
+    PORTD &= ~(1 << LCD_E_PIN);
+    _delay_us(50);
 }
 
 static void lcd_write_nibble(uint8_t nibble) {
-    // clear PC0..PC3
-    LCD_Data_Port &= ~((1 << LCD_D4) | (1 << LCD_D5) | (1 << LCD_D6) | (1 << LCD_D7));
-    // set according to nibble (bit0->D4 ... bit3->D7)
-    if (nibble & 0x01) LCD_Data_Port |= (1 << LCD_D4);
-    if (nibble & 0x02) LCD_Data_Port |= (1 << LCD_D5);
-    if (nibble & 0x04) LCD_Data_Port |= (1 << LCD_D6);
-    if (nibble & 0x08) LCD_Data_Port |= (1 << LCD_D7);
+    // Clear data pins
+    PORTB &= ~((1 << LCD_D4) | (1 << LCD_D5));
+    PORTC &= ~((1 << LCD_D6) | (1 << LCD_D7));
+    
+    // Set according to nibble
+    if (nibble & 0x01) PORTB |= (1 << LCD_D4);
+    if (nibble & 0x02) PORTB |= (1 << LCD_D5);
+    if (nibble & 0x04) PORTC |= (1 << LCD_D6);
+    if (nibble & 0x08) PORTC |= (1 << LCD_D7);
 
     lcd_pulse_enable();
 }
 
 static void lcd_send_byte(uint8_t value, bool is_data) {
-    if (is_data) CTRL_Port |= (1 << RS_PIN);
-    else         CTRL_Port &= ~(1 << RS_PIN);
-
-    // RW must be tied to GND physically
+    if (is_data) PORTD |= (1 << LCD_RS_PIN);
+    else         PORTD &= ~(1 << LCD_RS_PIN);
 
     uint8_t upper = (value >> 4) & 0x0F;
     uint8_t lower = value & 0x0F;
@@ -107,30 +108,31 @@ void send_string(const char *str) {
 }
 
 void lcd_init(void) {
-    // configure direction registers
-    CTRL_Dir |= (1 << RS_PIN) | (1 << E_pin); // RS and E outputs
-    LCD_Data_Dir |= (1 << LCD_D4) | (1 << LCD_D5) | (1 << LCD_D6) | (1 << LCD_D7);
+    // Configure direction registers
+    DDRD |= (1 << LCD_RS_PIN) | (1 << LCD_E_PIN);
+    DDRB |= (1 << LCD_D4) | (1 << LCD_D5);
+    DDRC |= (1 << LCD_D6) | (1 << LCD_D7);
 
-    CTRL_Port &= ~((1 << RS_PIN) | (1 << E_pin));
-    LCD_Data_Port &= ~((1 << LCD_D4) | (1 << LCD_D5) | (1 << LCD_D6) | (1 << LCD_D7));
+    PORTD &= ~((1 << LCD_RS_PIN) | (1 << LCD_E_PIN));
+    PORTB &= ~((1 << LCD_D4) | (1 << LCD_D5));
+    PORTC &= ~((1 << LCD_D6) | (1 << LCD_D7));
 
-    _delay_ms(40); // wait for LCD to power up
+    _delay_ms(40);
 
-    // Init sequence for 4-bit mode
     lcd_write_nibble(0x03);
     _delay_ms(5);
     lcd_write_nibble(0x03);
     _delay_us(150);
     lcd_write_nibble(0x03);
     _delay_us(150);
-    lcd_write_nibble(0x02); // set 4-bit mode
+    lcd_write_nibble(0x02);
     _delay_us(150);
 
-    send_command(0x28); // 4-bit, 2 lines, 5x8
-    send_command(0x0C); // display ON, cursor OFF, blink OFF
-    send_command(0x01); // clear
+    send_command(0x28);
+    send_command(0x0C);
+    send_command(0x01);
     _delay_ms(2);
-    send_command(0x06); // entry mode: inc, no shift
+    send_command(0x06);
 }
 
 /* --------------------------------------------------------------------- */
@@ -138,17 +140,12 @@ void lcd_init(void) {
 /* --------------------------------------------------------------------- */
 
 void motor_init(void) {
-    // Configure direction pins (IN1..IN4) as outputs (PD2..PD5)
     DDRD |= (1 << IN1) | (1 << IN2) | (1 << IN3) | (1 << IN4);
-
-    // Configure EN pins (PB1, PB2) as outputs
     DDRB |= (1 << ENA) | (1 << ENB);
 
-    // Ensure motors stopped initially
     OCR1A = 0;
     OCR1B = 0;
 
-    // Fast PWM 8-bit, non-inverting for OC1A/OC1B, prescaler = 8
     TCCR1A = (1 << WGM10) | (1 << COM1A1) | (1 << COM1B1);
     TCCR1B = (1 << WGM12) | (1 << CS11);
 }
@@ -202,33 +199,33 @@ void runWithGeneratedPWM(unsigned long durationMs, bool Aforward, bool Bforward,
 }
 
 /* --------------------------------------------------------------------- */
-/* Ultrasonic code (TRIG on PD7 / ECHO on PD6)                           */
+/* Ultrasonic code (TRIG on D12 / ECHO on D11)                           */
 /* --------------------------------------------------------------------- */
 
 void ultrasonic_init(void) {
-    DDRD |=  (1 << TRIG_PIN);   // TRIG output (PD7)
-    DDRD &= ~(1 << ECHO_PIN);   // ECHO input (PD6)
-    PORTD &= ~(1 << TRIG_PIN);
-    PORTD &= ~(1 << ECHO_PIN); // no pull-up
+    DDRB |=  (1 << TRIG_PIN);
+    DDRB &= ~(1 << ECHO_PIN);
+    PORTB &= ~(1 << TRIG_PIN);
+    PORTB &= ~(1 << ECHO_PIN);
 }
 
 float measure_distance(void) {
     uint32_t duration = 0;
     uint32_t timeout;
 
-    PORTD &= ~(1 << TRIG_PIN);
+    PORTB &= ~(1 << TRIG_PIN);
     _delay_us(2);
-    PORTD |=  (1 << TRIG_PIN);
+    PORTB |=  (1 << TRIG_PIN);
     _delay_us(10);
-    PORTD &= ~(1 << TRIG_PIN);
+    PORTB &= ~(1 << TRIG_PIN);
 
     timeout = 30000UL;
-    while (!(PIND & (1 << ECHO_PIN)) && timeout--) { _delay_us(1); }
+    while (!(PINB & (1 << ECHO_PIN)) && timeout--) { _delay_us(1); }
     if (timeout == 0) return 100.0f;
 
     duration = 0;
     timeout = 30000UL;
-    while ((PIND & (1 << ECHO_PIN)) && timeout--) { _delay_us(1); duration++; }
+    while ((PINB & (1 << ECHO_PIN)) && timeout--) { _delay_us(1); duration++; }
     if (timeout == 0) return 100.0f;
 
     float dist = (duration * 0.0343f) / 2.0f;
@@ -241,9 +238,9 @@ float measure_distance(void) {
 /* --------------------------------------------------------------------- */
 
 void init_usart(void) {
-    DDRD |= (1 << PD1);   // D1 = TX
+    DDRD |= (1 << PD1);
     UBRR0H = 0;
-    UBRR0L = 103; // 9600 @ 16 MHz
+    UBRR0L = 103;
     UCSR0B = (1 << TXEN0);
     UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
 }
@@ -318,7 +315,7 @@ int main(void) {
         _delay_ms(1000);
 
         dist = measure_distance();
-        send_command(1);  // Clear LCD
+        send_command(1);
         send_string("Dist: ");
         char dist_str[10];
         floatToString(dist, dist_str, 2);
