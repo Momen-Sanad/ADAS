@@ -1,8 +1,8 @@
 # AVR Makefile for ATmega328P
 
 # Project
-TARGET = main
-SRC = main.c
+TARGET = Test
+SRC = Test.c
 
 # MCU Settings
 MCU = atmega328p
