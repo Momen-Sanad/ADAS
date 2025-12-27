@@ -1,43 +1,43 @@
-# Compiler settings
-MCU = atmega32
+# AVR Makefile for ATmega328P
+
+# Project
+TARGET = Test
+SRC = Test.c
+
+# MCU Settings
+MCU = atmega328p
+F_CPU = 16000000UL
+
+# Compiler
 CC = avr-gcc
-CFLAGS = -mmcu=$(MCU) -Os
-OBJCPY = avr-objcopy
+OBJCOPY = avr-objcopy
 AVRDUDE = avrdude
-USBASP = usbasp
 
-# Directories
-SRC_DIR = src
-INC_DIR = include
-OBJ_DIR = obj
+# Flags
+CFLAGS = -mmcu=$(MCU) -DF_CPU=$(F_CPU) -Os -Wall -std=c99
+LDFLAGS = -mmcu=$(MCU)
 
-# Files
-SRC = $(wildcard $(SRC_DIR)/APP/*.c) \
-      $(wildcard $(SRC_DIR)/HAL/*.c) \
-      $(wildcard $(SRC_DIR)/MCAL/*.c)
-
-OBJ = $(SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+# Programmer (Arduino Uno uses arduino programmer)
+PROGRAMMER = arduino
+PORT = /dev/ttyACM0
+BAUD = 115200
 
 # Targets
-all: out.hex
+all: $(TARGET).hex
 
-# Rule to compile .c to .o files
-$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
-	@mkdir -p $(OBJ_DIR)/APP $(OBJ_DIR)/HAL $(OBJ_DIR)/MCAL  # Create necessary obj directories
-	$(CC) $(CFLAGS) -I$(INC_DIR) -c $< -o $@
+$(TARGET).elf: $(SRC)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $(TARGET).elf $(SRC)
 
-# Link object files to create ELF file
-out.elf: $(OBJ)
-	$(CC) $(CFLAGS) -o $@ $^
+$(TARGET).hex: $(TARGET).elf
+	$(OBJCOPY) -O ihex -R .eeprom $(TARGET).elf $(TARGET).hex
 
-# Convert ELF file to HEX file
-out.hex: out.elf
-	$(OBJCPY) -O ihex out.elf out.hex
+flash: $(TARGET).hex
+	$(AVRDUDE) -c $(PROGRAMMER) -p $(MCU) -P $(PORT) -b $(BAUD) -U flash:w:$(TARGET).hex
 
-# Flash the HEX file to the device
-flash: out.hex
-	$(AVRDUDE) -c $(USBASP) -p m32 -U flash:w:out.hex:i
-
-# Clean up all generated files
 clean:
-	rm -rf $(OBJ_DIR) out.elf out.hex
+	rm -f *.elf *.hex
+
+size: $(TARGET).elf
+	avr-size --mcu=$(MCU) -C $(TARGET).elf
+
+.PHONY: all flash clean size
