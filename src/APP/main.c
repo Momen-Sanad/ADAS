@@ -26,7 +26,18 @@ const unsigned long pwmCycleMs = 2000UL;
 const uint8_t pwmMin = 0;
 const uint8_t pwmMax = 200;
 const unsigned long sampleIntervalMs = 10UL;
-volatile uint8_t currentPwmMax = 200;  // runtime-adjustable speed
+
+/* Runtime-adjustable speed (0..pwmMax). Default to pwmMax */
+volatile uint8_t currentPwmMax = pwmMax;
+
+/* MAX_SPEED_M_S: linear speed (m/s) at currentPwmMax == pwmMax
+   DECEL_M_S2: braking deceleration magnitude (m/s^2) when braking */
+const float MAX_SPEED_M_S = 0.60f;   // adjust to measured top speed (m/s)
+const float DECEL_M_S2    = 1.50f;   // adjust to measured braking deceleration (m/s^2)
+#define UTURN_DURATION_MS 1100UL     // Duration (ms) needed for ~180° rotation (tune it too)
+
+/* Track current motion: 0=stop, 1=forward, -1=backward, 2=turning */
+volatile int8_t currentMotion = 0;
 
 /* LCD Pin Definitions (4-bit) */
 // RS = D2 = PD2
@@ -154,8 +165,11 @@ void motor_init(void) {
     TCCR1B = (1 << WGM12) | (1 << CS11);
 }
 
+/* generateSinePWM now uses currentPwmMax (runtime) instead of the compile-time pwmMax.
+   Signature unchanged to preserve compatibility with calls. */
 uint8_t generateSinePWM(unsigned long tMs, unsigned long cycleMs, uint8_t minVal, uint8_t maxVal, float phase) {
-    if (cycleMs == 0) return maxVal;
+    (void)maxVal; // keep parameter for compatibility; we use currentPwmMax instead
+    if (cycleMs == 0) return currentPwmMax;
     unsigned long t = tMs % cycleMs;
     float phaseT = (float)t / (float)cycleMs;
     phaseT += phase;
@@ -170,6 +184,11 @@ uint8_t generateSinePWM(unsigned long tMs, unsigned long cycleMs, uint8_t minVal
 }
 
 void runWithGeneratedPWM(unsigned long durationMs, bool Aforward, bool Bforward, float phaseShiftB) {
+    // set motion tracking
+    if (Aforward && Bforward) currentMotion = 1;
+    else if (!Aforward && !Bforward) currentMotion = -1;
+    else currentMotion = 2; // turning
+
     if (Aforward) {
         PORTD |=  (1 << IN1);
         PORTD &= ~(1 << IN2);
@@ -200,6 +219,9 @@ void runWithGeneratedPWM(unsigned long durationMs, bool Aforward, bool Bforward,
 
     OCR1A = 0;
     OCR1B = 0;
+
+    // after stopping
+    currentMotion = 0;
 }
 
 /* --------------------------------------------------------------------- */
@@ -312,6 +334,64 @@ void floatToString(float value, char* str, int precision) {
 }
 
 /* --------------------------------------------------------------------- */
+/* Helper: compute TTC and stopping metrics and print them               */
+/* --------------------------------------------------------------------- */
+void compute_and_report_ttc(float dist_cm) {
+    // Convert cm -> meters
+    float dist_m = dist_cm / 100.0f;
+
+    // Estimate linear speed (m/s) based on currentPwmMax (linear scaling)
+    float speed_m_s = ((float)currentPwmMax / (float)pwmMax) * MAX_SPEED_M_S;
+
+    if (currentMotion != 1 || speed_m_s <= 0.0001f) {
+        // Not driving forward or stopped: report N/A or distance only
+        usart_print_string("Dist: ");
+        usart_print_float(dist_cm);
+        usart_print_string(" cm  TTC: N/A\n");
+        return;
+    }
+
+    // Time to collision if no braking (s)
+    float ttc_no_brake = (speed_m_s > 0.0001f) ? (dist_m / speed_m_s) : -1.0f;
+
+    // Stopping time under assumed deceleration (s): t_stop = v / a
+    float t_stop = speed_m_s / DECEL_M_S2;
+
+    // Stopping distance (m): d_stop = v^2 / (2*a)
+    float d_stop = (speed_m_s * speed_m_s) / (2.0f * DECEL_M_S2);
+
+    // Determine if we can stop before collision
+    bool will_stop_in_time = (d_stop <= dist_m);
+
+    // Print summary to USART
+    usart_print_string("Dist: ");
+    usart_print_float(dist_cm);
+    usart_print_string(" cm  ");
+
+    if (ttc_no_brake > 0.0f) {
+        usart_print_string("TTC_no_brake: ");
+        usart_print_float(ttc_no_brake);
+        usart_print_string(" s  ");
+    } 
+    else
+        usart_print_string("TTC_no_brake: inf  ");
+    
+
+    usart_print_string("t_stop: ");
+    usart_print_float(t_stop);
+    usart_print_string(" s  d_stop: ");
+    // convert to cm for printing convenience
+    usart_print_float(d_stop * 100.0f);
+    usart_print_string(" cm  ");
+
+    if (will_stop_in_time) {
+        usart_print_string("SAFE\n");
+    } else {
+        usart_print_string("CRITICAL\n");
+    }
+}
+
+/* --------------------------------------------------------------------- */
 /* Main program                                                          */
 /* --------------------------------------------------------------------- */
 
@@ -329,72 +409,80 @@ int main(void) {
         // Check for Bluetooth command (non-blocking)
         int incoming = usart_receive_nonblocking();
         if (incoming != -1) {
+            // handle single-character commands; keep behavior non-invasive
             char cmd = (char)incoming;
-            if (cmd >= 'a' && cmd <= 'z') cmd = cmd - 'a' + 'A';
+            if (cmd >= 'a' && cmd <= 'z') cmd = cmd - 'a' + 'A'; // uppercase
 
-            // Speed control
+            // Speed control: '0'..'9'
             if (cmd >= '0' && cmd <= '9') {
-                uint8_t level = cmd - '0';
+                uint8_t level = cmd - '0'; // 0..9
                 currentPwmMax = (uint8_t)((level * pwmMax) / 9);
+                // keep currentMotion unchanged (speed adjusted)
             }
 
             switch (cmd) {
-                case 'F':
+                case 'F': // Forward
+                    currentMotion = 1;
                     runWithGeneratedPWM(2000UL, true, true, 0.5f);
                     break;
-                case 'B':
+                case 'B': // Backward
+                    currentMotion = -1;
                     runWithGeneratedPWM(2000UL, false, false, 0.5f);
                     break;
-                case 'L':
+                case 'L': // Left: A backward, B forward
+                    currentMotion = 2;
                     runWithGeneratedPWM(2000UL, false, true, 0.5f);
                     break;
-                case 'R':
+                case 'R': // Right: A forward, B backward
+                    currentMotion = 2;
                     runWithGeneratedPWM(2000UL, true, false, 0.5f);
                     break;
-                case 'S':
+                case 'S': // Stop
                     OCR1A = 0;
                     OCR1B = 0;
+                    currentMotion = 0;
+                    break;
+                case 'U': // U-Turn (rotate ~180 degrees)
+                    // This keeps rotation angle consistent when speed changes.
+                    unsigned long scaledUTurn = (UTURN_DURATION_MS * pwmMax) / (currentPwmMax + 1);
+                    currentMotion = 2; // turning
+                    runWithGeneratedPWM(scaledUTurn, true, false, 0.5f);
                     break;
                 default:
+                    // ignore unknown
                     break;
             }
-        } else {
-            // No Bluetooth command -> autonomous behavior
-            // runWithGeneratedPWM(2000UL, true, true, 0.5f);
-            // _delay_ms(100);
-
-            float d1 = measure_distance();
-            usart_print_float(d1);
-            // usart_print_string(" cm (after forward)\n");
-
-            _delay_ms(500);
-
-            // runWithGeneratedPWM(2000UL, false, false, 0.5f);
-            // _delay_ms(100);
-
-            float d2 = measure_distance();
-            usart_print_float(d2);
-            // usart_print_string(" cm (after reverse)\n");
-
-            // _delay_ms(1000);
-
-            dist = measure_distance();
-            send_command(1);
-            send_string("Dist: ");
-            char dist_str[10];
-            floatToString(dist, dist_str, 2);
-            send_string(dist_str);
-            send_string(" cm");
-
-            _delay_ms(1000);
+            // after executing a bluetooth command, continue loop to perform ultrasonic prints/display
         }
-        
-        _delay_ms(500);
-        send_command(0xC0); // second line
-        send_string("SPD: ");
-        SendData('0' + (currentPwmMax * 9) / pwmMax);
+        // periodic distance reporting
+        // take a measurement and report TTC info
+        float d1 = measure_distance();
+        // Print two readings and compute TTC using the last measured distance.
+        // First measurement:
+        usart_print_float(d1);
+        usart_print_string(" cm\n");
+
         _delay_ms(500);
 
+        float d2 = measure_distance();
+        usart_print_float(d2);
+        usart_print_string(" cm\n");
+
+        // Final measurement for LCD and TTC computation
+        dist = measure_distance();
+
+        // Clear LCD and show distance + basic info
+        send_command(1);
+        send_string("Dist: ");
+        char dist_str[10];
+        floatToString(dist, dist_str, 2);
+        send_string(dist_str);
+        send_string(" cm");
+
+        // compute and report TTC info over serial
+        compute_and_report_ttc(dist);
+
+        _delay_ms(1000);
     }
 
     return 0;
