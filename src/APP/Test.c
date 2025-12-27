@@ -6,50 +6,48 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <stdio.h>
-
-
-#define OBSTACLE_THRESHOLD_CM   5       // Stop if distance <= 5cm
-#define TURN_90_TIME_MS         400     // Time to turn 90 degrees (adjust!)
-#define TURN_180_TIME_MS        800     // Time to turn 180 degrees (adjust!)
-#define TURN_SPEED              150     // PWM speed when turning to look
-#define DATA_SEND_INTERVAL_MS   500     // Send data every 500ms (2x per second)
-#define SEARCH_DELAY_MS         200     // Delay after turn before measuring
-
-
-// Motor pins (L298N)
-#define ENA     PB1  // D9 (OC1A - PWM)
-#define ENB     PB2  // D10 (OC1B - PWM)
-#define IN1     PD3  // D3
-#define IN2     PD4  // D4
-#define IN3     PD5  // D5
-#define IN4     PD6  // D6
-
-// Ultrasonic pins (HC-SR04)
-#define TRIG_PIN PB4  // D12
-#define ECHO_PIN PB3  // D11
-
-// LCD pins (4-bit mode)
-#define LCD_RS_PIN    PD2   // D2
-#define LCD_E_PIN     PD7   // D7
-#define LCD_D4        PB0   // D8
-#define LCD_D5        PB5   // D13
-#define LCD_D6        PC2   // A2
-#define LCD_D7        PC3   // A3
-
-// Bluetooth on D0/D1 (Hardware UART)
-// HC-05 TXD → D0 (RX)
-// HC-05 RXD → D1 (TX)
 
 /* ===================================================================== */
-/* GLOBAL VARIABLES                                                      */
+/* PARAMETERS                                                            */
+/* ===================================================================== */
+
+#define OBSTACLE_THRESHOLD_CM   5
+#define TURN_90_TIME_MS         400
+#define TURN_180_TIME_MS        800
+#define TURN_SPEED              150
+#define DATA_SEND_INTERVAL_MS   500
+#define SEARCH_DELAY_MS         200
+
+/* ===================================================================== */
+/* PINS                                                                  */
+/* ===================================================================== */
+
+#define ENA     PB1
+#define ENB     PB2
+#define IN1     PD3
+#define IN2     PD4
+#define IN3     PD5
+#define IN4     PD6
+
+#define TRIG_PIN PB4
+#define ECHO_PIN PB3
+
+#define LCD_RS_PIN    PD2
+#define LCD_E_PIN     PD7
+#define LCD_D4        PB0
+#define LCD_D5        PB5
+#define LCD_D6        PC2
+#define LCD_D7        PC3
+
+/* ===================================================================== */
+/* GLOBALS                                                               */
 /* ===================================================================== */
 
 volatile uint8_t targetSpeed = 0;
 volatile uint8_t currentSpeed = 0;
 volatile bool brakeActive = false;
+volatile bool isMoving = false;
 
-// Direction: 0=STOP, 1=FWD, 2=RIGHT, 3=LEFT
 #define DIR_STOP    0
 #define DIR_FWD     1
 #define DIR_RIGHT   2
@@ -61,12 +59,15 @@ volatile char rxBuffer[RX_BUFFER_SIZE];
 volatile uint8_t rxIndex = 0;
 volatile bool commandReady = false;
 
-// Timing
 volatile uint32_t millisCounter = 0;
 uint32_t lastDataSendTime = 0;
+uint32_t loopCounter = 0;
 
 float currentDistance = 999.0f;
 
+/* ===================================================================== */
+/* TIMER                                                                 */
+/* ===================================================================== */
 
 void timer0_init(void) {
     TCCR0A = (1 << WGM01);
@@ -92,50 +93,49 @@ void delay_ms(uint16_t ms) {
     while (millis() - start < ms);
 }
 
+/* ===================================================================== */
+/* UART - SIMPLE VERSION FOR DEBUG                                       */
+/* ===================================================================== */
+
 void uart_init(void) {
+    // Try 9600 baud
     UBRR0H = 0;
     UBRR0L = 103;
     UCSR0B = (1 << RXEN0) | (1 << TXEN0) | (1 << RXCIE0);
     UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
 }
 
-void uart_transmit(unsigned char data) {
+void uart_tx(char c) {
     while (!(UCSR0A & (1 << UDRE0)));
-    UDR0 = data;
+    UDR0 = c;
 }
 
-void uart_print(const char* str) {
-    while (*str) uart_transmit(*str++);
+void uart_print(const char* s) {
+    while (*s) uart_tx(*s++);
 }
 
-void uart_print_int(int16_t value) {
-    if (value < 0) {
-        uart_transmit('-');
-        value = -value;
+void uart_println(const char* s) {
+    uart_print(s);
+    uart_tx('\r');
+    uart_tx('\n');
+}
+
+void uart_print_num(int16_t n) {
+    if (n < 0) {
+        uart_tx('-');
+        n = -n;
     }
-    if (value == 0) {
-        uart_transmit('0');
+    if (n == 0) {
+        uart_tx('0');
         return;
     }
     char buf[8];
     int8_t i = 0;
-    while (value > 0 && i < 7) {
-        buf[i++] = '0' + (value % 10);
-        value /= 10;
+    while (n > 0 && i < 7) {
+        buf[i++] = '0' + (n % 10);
+        n /= 10;
     }
-    while (i > 0) uart_transmit(buf[--i]);
-}
-
-void uart_print_float(float value) {
-    if (value < 0.0f) {
-        uart_transmit('-');
-        value = -value;
-    }
-    int16_t int_part = (int16_t)value;
-    int16_t frac_part = (int16_t)((value - int_part) * 10.0f + 0.5f);
-    uart_print_int(int_part);
-    uart_transmit('.');
-    uart_print_int(frac_part);
+    while (i > 0) uart_tx(buf[--i]);
 }
 
 ISR(USART_RX_vect) {
@@ -150,7 +150,11 @@ ISR(USART_RX_vect) {
         rxBuffer[rxIndex++] = c;
     }
 }
-// Speed Setting + brake as using Bluetooth
+
+/* ===================================================================== */
+/* COMMAND                                                               */
+/* ===================================================================== */
+
 void processCommand(void) {
     if (!commandReady) return;
     
@@ -160,114 +164,122 @@ void processCommand(void) {
     commandReady = false;
     sei();
     
+    uart_print("CMD: ");
+    uart_println(cmd);
+    
     if (strncmp(cmd, "SPD:", 4) == 0) {
         int speed = atoi(cmd + 4);
         if (speed < 0) speed = 0;
         if (speed > 255) speed = 255;
         targetSpeed = (uint8_t)speed;
         brakeActive = false;
-        uart_print("OK:SPD=");
-        uart_print_int(targetSpeed);
-        uart_print("\r\n");
+        isMoving = (targetSpeed > 0);
+        
+        uart_print("SET SPD=");
+        uart_print_num(targetSpeed);
+        uart_println("");
     }
     else if (strcmp(cmd, "STOP") == 0) {
         brakeActive = true;
+        isMoving = false;
         targetSpeed = 0;
-        uart_print("OK:BRAKE\r\n");
+        uart_println("BRAKE ON");
+    }
+    else if (strcmp(cmd, "GO") == 0) {
+        brakeActive = false;
+        isMoving = true;
+        uart_println("GO");
     }
     else {
-        uart_print("ERR:UNKNOWN\r\n");
+        uart_println("UNKNOWN CMD");
     }
 }
 
-// LCS drivers
-static void lcd_pulse_enable(void) {
+/* ===================================================================== */
+/* LCD                                                                   */
+/* ===================================================================== */
+
+void lcd_pulse(void) {
     PORTD |= (1 << LCD_E_PIN);
-    _delay_us(1);
+    _delay_us(2);
     PORTD &= ~(1 << LCD_E_PIN);
-    _delay_us(50);
+    _delay_us(100);
 }
 
-static void lcd_write_nibble(uint8_t nibble) {
+void lcd_nibble(uint8_t n) {
     PORTB &= ~((1 << LCD_D4) | (1 << LCD_D5));
     PORTC &= ~((1 << LCD_D6) | (1 << LCD_D7));
-    if (nibble & 0x01) PORTB |= (1 << LCD_D4);
-    if (nibble & 0x02) PORTB |= (1 << LCD_D5);
-    if (nibble & 0x04) PORTC |= (1 << LCD_D6);
-    if (nibble & 0x08) PORTC |= (1 << LCD_D7);
-    lcd_pulse_enable();
+    if (n & 0x01) PORTB |= (1 << LCD_D4);
+    if (n & 0x02) PORTB |= (1 << LCD_D5);
+    if (n & 0x04) PORTC |= (1 << LCD_D6);
+    if (n & 0x08) PORTC |= (1 << LCD_D7);
+    lcd_pulse();
 }
 
-static void lcd_send_byte(uint8_t value, bool is_data) {
-    if (is_data) PORTD |= (1 << LCD_RS_PIN);
-    else         PORTD &= ~(1 << LCD_RS_PIN);
-    lcd_write_nibble((value >> 4) & 0x0F);
-    lcd_write_nibble(value & 0x0F);
+void lcd_byte(uint8_t v, bool data) {
+    if (data) PORTD |= (1 << LCD_RS_PIN);
+    else      PORTD &= ~(1 << LCD_RS_PIN);
+    _delay_us(5);
+    lcd_nibble((v >> 4) & 0x0F);
+    lcd_nibble(v & 0x0F);
     _delay_us(50);
 }
 
-void lcd_command(uint8_t cmd) {
-    lcd_send_byte(cmd, false);
-    if (cmd == 0x01 || cmd == 0x02) _delay_ms(2);
+void lcd_cmd(uint8_t c) {
+    lcd_byte(c, false);
+    if (c == 0x01 || c == 0x02) _delay_ms(2);
 }
 
-void lcd_data(char data) {
-    lcd_send_byte((uint8_t)data, true);
+void lcd_char(char c) {
+    lcd_byte((uint8_t)c, true);
 }
 
-void lcd_print(const char *str) {
-    while (*str) lcd_data(*str++);
+void lcd_str(const char *s) {
+    while (*s) lcd_char(*s++);
 }
 
-void lcd_set_cursor(uint8_t row, uint8_t col) {
-    uint8_t address = (row == 0) ? 0x00 : 0x40;
-    lcd_command(0x80 | (address + col));
+void lcd_pos(uint8_t row, uint8_t col) {
+    lcd_cmd(0x80 | ((row ? 0x40 : 0x00) + col));
 }
 
 void lcd_clear(void) {
-    lcd_command(0x01);
+    lcd_cmd(0x01);
+    _delay_ms(2);
 }
 
-void lcd_print_int(int16_t value) {
-    if (value < 0) {
-        lcd_data('-');
-        value = -value;
-    }
-    if (value == 0) {
-        lcd_data('0');
-        return;
-    }
+void lcd_num(int16_t n) {
+    if (n < 0) { lcd_char('-'); n = -n; }
+    if (n == 0) { lcd_char('0'); return; }
     char buf[8];
     int8_t i = 0;
-    while (value > 0 && i < 7) {
-        buf[i++] = '0' + (value % 10);
-        value /= 10;
-    }
-    while (i > 0) lcd_data(buf[--i]);
+    while (n > 0 && i < 7) { buf[i++] = '0' + (n % 10); n /= 10; }
+    while (i > 0) lcd_char(buf[--i]);
 }
+
 void lcd_init(void) {
     DDRD |= (1 << LCD_RS_PIN) | (1 << LCD_E_PIN);
     DDRB |= (1 << LCD_D4) | (1 << LCD_D5);
     DDRC |= (1 << LCD_D6) | (1 << LCD_D7);
+    
     PORTD &= ~((1 << LCD_RS_PIN) | (1 << LCD_E_PIN));
     PORTB &= ~((1 << LCD_D4) | (1 << LCD_D5));
     PORTC &= ~((1 << LCD_D6) | (1 << LCD_D7));
-    _delay_ms(40);
-    lcd_write_nibble(0x03);
-    _delay_ms(5);
-    lcd_write_nibble(0x03);
-    _delay_us(150);
-    lcd_write_nibble(0x03);
-    _delay_us(150);
-    lcd_write_nibble(0x02);
-    _delay_us(150);
-    lcd_command(0x28);
-    lcd_command(0x0C);
-    lcd_command(0x01);
-    _delay_ms(2);
-    lcd_command(0x06);
+    
+    _delay_ms(50);
+    lcd_nibble(0x03); _delay_ms(5);
+    lcd_nibble(0x03); _delay_ms(1);
+    lcd_nibble(0x03); _delay_ms(1);
+    lcd_nibble(0x02); _delay_ms(1);
+    
+    lcd_cmd(0x28); _delay_ms(1);
+    lcd_cmd(0x0C); _delay_ms(1);
+    lcd_cmd(0x06); _delay_ms(1);
+    lcd_cmd(0x01); _delay_ms(2);
 }
 
+/* ===================================================================== */
+/* MOTOR                                                                 */
+/* ===================================================================== */
 
 void motor_init(void) {
     DDRD |= (1 << IN1) | (1 << IN2) | (1 << IN3) | (1 << IN4);
@@ -278,7 +290,7 @@ void motor_init(void) {
     TCCR1A = (1 << WGM10) | (1 << COM1A1) | (1 << COM1B1);
     TCCR1B = (1 << WGM12) | (1 << CS11);
 }
-// Motors Drivers
+
 void motor_stop(void) {
     OCR1A = 0;
     OCR1B = 0;
@@ -287,37 +299,43 @@ void motor_stop(void) {
     currentDirection = DIR_STOP;
 }
 
-void motor_forward(uint8_t speed) {
+void motor_fwd(uint8_t spd) {
     PORTD |= (1 << IN1);
     PORTD &= ~(1 << IN2);
     PORTD |= (1 << IN3);
     PORTD &= ~(1 << IN4);
-    OCR1A = speed;
-    OCR1B = speed;
-    currentSpeed = speed;
+    OCR1A = spd;
+    OCR1B = spd;
+    currentSpeed = spd;
     currentDirection = DIR_FWD;
 }
 
-void motor_turn_right(uint8_t speed) {
+void motor_right(uint8_t spd) {
     PORTD |= (1 << IN1);
     PORTD &= ~(1 << IN2);
     PORTD &= ~(1 << IN3);
     PORTD |= (1 << IN4);
-    OCR1A = speed;
-    OCR1B = speed;
+    OCR1A = spd;
+    OCR1B = spd;
+    currentSpeed = spd;
     currentDirection = DIR_RIGHT;
 }
 
-void motor_turn_left(uint8_t speed) {
+void motor_left(uint8_t spd) {
     PORTD &= ~(1 << IN1);
     PORTD |= (1 << IN2);
     PORTD |= (1 << IN3);
     PORTD &= ~(1 << IN4);
-    OCR1A = speed;
-    OCR1B = speed;
+    OCR1A = spd;
+    OCR1B = spd;
+    currentSpeed = spd;
     currentDirection = DIR_LEFT;
 }
-// sensor's Shit --should stops at 5 cm
+
+/* ===================================================================== */
+/* ULTRASONIC                                                            */
+/* ===================================================================== */
+
 void ultrasonic_init(void) {
     DDRB |= (1 << TRIG_PIN);
     DDRB &= ~(1 << ECHO_PIN);
@@ -325,9 +343,9 @@ void ultrasonic_init(void) {
     PORTB &= ~(1 << ECHO_PIN);
 }
 
-float measure_distance(void) {
-    uint32_t duration = 0;
-    uint32_t timeout;
+float measure_dist(void) {
+    uint32_t dur = 0;
+    uint32_t tout;
 
     PORTB &= ~(1 << TRIG_PIN);
     _delay_us(2);
@@ -335,138 +353,106 @@ float measure_distance(void) {
     _delay_us(10);
     PORTB &= ~(1 << TRIG_PIN);
 
-    timeout = 30000UL;
-    while (!(PINB & (1 << ECHO_PIN)) && timeout--) { _delay_us(1); }
-    if (timeout == 0) return 999.0f;
+    tout = 30000UL;
+    while (!(PINB & (1 << ECHO_PIN)) && tout--) { _delay_us(1); }
+    if (tout == 0) return 999.0f;
 
-    duration = 0;
-    timeout = 30000UL;
-    while ((PINB & (1 << ECHO_PIN)) && timeout--) { _delay_us(1); duration++; }
-    if (timeout == 0) return 999.0f;
+    dur = 0;
+    tout = 30000UL;
+    while ((PINB & (1 << ECHO_PIN)) && tout--) { _delay_us(1); dur++; }
+    if (tout == 0) return 999.0f;
 
-    float dist = (duration * 0.0343f) / 2.0f;
-    if (dist > 400.0f) dist = 400.0f;
-    return dist;
+    float d = (dur * 0.0343f) / 2.0f;
+    if (d > 400.0f) d = 400.0f;
+    return d;
 }
 
-// motors as logic -- Direction 
-void turn_right_90(void) {
-    motor_turn_right(TURN_SPEED);
+/* ===================================================================== */
+/* OBSTACLE AVOIDANCE                                                    */
+/* ===================================================================== */
+
+void turn_r90(void) {
+    uart_println("TURN R90");
+    motor_right(TURN_SPEED);
     delay_ms(TURN_90_TIME_MS);
     motor_stop();
     delay_ms(SEARCH_DELAY_MS);
 }
 
-void turn_left_90(void) {
-    motor_turn_left(TURN_SPEED);
-    delay_ms(TURN_90_TIME_MS);
-    motor_stop();
-    delay_ms(SEARCH_DELAY_MS);
-}
-
-void turn_left_180(void) {
-    motor_turn_left(TURN_SPEED);
+void turn_l180(void) {
+    uart_println("TURN L180");
+    motor_left(TURN_SPEED);
     delay_ms(TURN_180_TIME_MS);
     motor_stop();
     delay_ms(SEARCH_DELAY_MS);
 }
 
-void spin_180(void) {
-    motor_turn_right(TURN_SPEED);
+void spin180(void) {
+    uart_println("SPIN 180");
+    motor_right(TURN_SPEED);
     delay_ms(TURN_180_TIME_MS);
     motor_stop();
     delay_ms(SEARCH_DELAY_MS);
 }
 
-uint8_t searchClearDirection(void) {
-    float dist;
+uint8_t searchDir(void) {
+    float d;
     
-    turn_right_90();
-    dist = measure_distance();
-    if (dist > OBSTACLE_THRESHOLD_CM) {
-        return DIR_RIGHT;
-    }
+    uart_println("SEARCH: RIGHT");
+    turn_r90();
+    d = measure_dist();
+    uart_print("R=");
+    uart_print_num((int16_t)d);
+    uart_println("cm");
+    if (d > OBSTACLE_THRESHOLD_CM) return DIR_RIGHT;
     
-    turn_left_180();
-    dist = measure_distance();
-    if (dist > OBSTACLE_THRESHOLD_CM) {
-        return DIR_LEFT;
-    }
+    uart_println("SEARCH: LEFT");
+    turn_l180();
+    d = measure_dist();
+    uart_print("L=");
+    uart_print_num((int16_t)d);
+    uart_println("cm");
+    if (d > OBSTACLE_THRESHOLD_CM) return DIR_LEFT;
     
-    spin_180();
-    dist = measure_distance();
-    if (dist > OBSTACLE_THRESHOLD_CM) {
-        return DIR_FWD;
-    }
+    uart_println("SEARCH: BACK");
+    spin180();
+    d = measure_dist();
+    uart_print("B=");
+    uart_print_num((int16_t)d);
+    uart_println("cm");
+    if (d > OBSTACLE_THRESHOLD_CM) return DIR_FWD;
     
     return DIR_STOP;
 }
 
-//Data Sending
-
-void sendDataToPC(void) {
-    uart_print("DIST:");
-    if (currentDistance >= 999.0f) {
-        uart_print("CLEAR");
-    } else {
-        uart_print_float(currentDistance);
-    }
+void handleObs(void) {
+    uart_println("!! OBSTACLE !!");
+    motor_stop();
+    delay_ms(200);
     
-    uart_print(",SPD:");
-    uart_print_int(currentSpeed);
-    
-    uart_print(",DIR:");
-    switch (currentDirection) {
-        case DIR_FWD:   uart_print("FWD");   break;
-        case DIR_RIGHT: uart_print("RIGHT"); break;
-        case DIR_LEFT:  uart_print("LEFT");  break;
-        default:        uart_print("STOP");  break;
-    }
-    
-    uart_print(",STATUS:");
-    if (brakeActive) {
-        uart_print("BRAKE");
-    } else if (currentDistance <= OBSTACLE_THRESHOLD_CM) {
-        uart_print("OBSTACLE");
-    } else {
-        uart_print("OK");
-    }
-    
-    uart_print("\r\n");
-}
-
-// LCD
-void updateLCD(void) {
-    lcd_clear();
-    
-    lcd_set_cursor(0, 0);
-    lcd_print("D:");
-    if (currentDistance >= 999.0f) {
-        lcd_print("CLR");
-    } else {
-        lcd_print_int((int16_t)currentDistance);
-    }
-    lcd_print("cm S:");
-    lcd_print_int(currentSpeed);
-    
-    lcd_set_cursor(1, 0);
-    switch (currentDirection) {
-        case DIR_FWD:   lcd_print("FWD  "); break;
-        case DIR_RIGHT: lcd_print("RIGHT"); break;
-        case DIR_LEFT:  lcd_print("LEFT "); break;
-        default:        lcd_print("STOP "); break;
-    }
+    uint8_t dir = searchDir();
     
     if (brakeActive) {
-        lcd_print(" BRAKE");
-    } else if (currentDistance <= OBSTACLE_THRESHOLD_CM) {
-        lcd_print(" OBST!");
+        uart_println("BRAKE ACTIVE");
+        isMoving = false;
+        return;
+    }
+    
+    if (dir == DIR_STOP) {
+        uart_println("ALL BLOCKED");
+        isMoving = false;
     } else {
-        lcd_print(" OK");
+        uart_println("CLEAR FOUND");
+        motor_fwd(targetSpeed);
     }
 }
-// Main Func
+
+/* ===================================================================== */
+/* MAIN                                                                  */
+/* ===================================================================== */
+
 int main(void) {
+    // Init
     motor_init();
     ultrasonic_init();
     uart_init();
@@ -475,54 +461,89 @@ int main(void) {
     
     sei();
     
+    // Startup
     lcd_clear();
-    lcd_print("ADAS System");
-    lcd_set_cursor(1, 0);
-    lcd_print("Ready...");
+    lcd_str("DEBUG MODE");
     
-    uart_print("ADAS System Ready\r\n");
-    uart_print("CMD: SPD:0-255, STOP\r\n");
+    uart_println("");
+    uart_println("================");
+    uart_println("ADAS DEBUG v1.0");
+    uart_println("================");
+    uart_println("CMD: SPD:xxx STOP GO");
+    uart_println("");
     
     delay_ms(1000);
     
     while (1) {
+        loopCounter++;
+        
+        // 1. Commands
         processCommand();
         
-        currentDistance = measure_distance();
+        // 2. Sensor
+        currentDistance = measure_dist();
         
-        if (brakeActive) {
-            motor_stop();
+        // 3. Debug print every 20 loops (~1 sec)
+        if (loopCounter % 20 == 0) {
+            uart_print("[");
+            uart_print_num(loopCounter);
+            uart_print("] D=");
+            uart_print_num((int16_t)currentDistance);
+            uart_print(" SPD=");
+            uart_print_num(currentSpeed);
+            uart_print(" TGT=");
+            uart_print_num(targetSpeed);
+            uart_print(" MOV=");
+            uart_print_num(isMoving);
+            uart_print(" BRK=");
+            uart_print_num(brakeActive);
+            uart_println("");
         }
-        else if (currentDistance <= OBSTACLE_THRESHOLD_CM && targetSpeed > 0) {
-            motor_stop();
-            uart_print("OBSTACLE! Searching...\r\n");
-            
-            uint8_t newDir = searchClearDirection();
-            
-            if (newDir != DIR_STOP && !brakeActive) {
-                motor_forward(targetSpeed);
-                uart_print("Clear: ");
-                switch (newDir) {
-                    case DIR_FWD:   uart_print("FWD\r\n");   break;
-                    case DIR_RIGHT: uart_print("RIGHT\r\n"); break;
-                    case DIR_LEFT:  uart_print("LEFT\r\n");  break;
-                }
-            } else {
+        
+        // 4. Control
+        if (brakeActive) {
+            if (currentSpeed > 0) {
+                uart_println("BRAKE->STOP");
                 motor_stop();
-                uart_print("All blocked!\r\n");
             }
         }
-        else if (targetSpeed > 0 && !brakeActive) {
-            motor_forward(targetSpeed);
+        else if (isMoving && targetSpeed > 0) {
+            if (currentDistance <= OBSTACLE_THRESHOLD_CM) {
+                handleObs();
+            }
+            else if (currentSpeed == 0) {
+                uart_println("START FWD");
+                motor_fwd(targetSpeed);
+            }
         }
         else {
-            motor_stop();
+            if (currentSpeed > 0) {
+                uart_println("IDLE->STOP");
+                motor_stop();
+            }
         }
         
+        // 5. LCD update every 500ms
         if (millis() - lastDataSendTime >= DATA_SEND_INTERVAL_MS) {
             lastDataSendTime = millis();
-            sendDataToPC();
-            updateLCD();
+            
+            lcd_pos(0, 0);
+            lcd_str("D:");
+            lcd_num((int16_t)currentDistance);
+            lcd_str("cm S:");
+            lcd_num(currentSpeed);
+            lcd_str("  ");
+            
+            lcd_pos(1, 0);
+            if (brakeActive) lcd_str("BRAKE ");
+            else if (isMoving) lcd_str("RUN   ");
+            else lcd_str("IDLE  ");
+            
+            if (currentDistance <= OBSTACLE_THRESHOLD_CM) {
+                lcd_str("OBST!");
+            } else {
+                lcd_str("OK   ");
+            }
         }
         
         delay_ms(50);
