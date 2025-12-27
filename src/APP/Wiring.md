@@ -11,7 +11,7 @@
 | Battery −       | L298N **GND**                    |
 | Arduino **GND** | L298N **GND** (common ground)    |
 ---
-### L298N → Arduino (matches the code)
+### L298N -> Arduino (matches the code)
 ---
 | L298N | Arduino Uno |
 | ----- | ----------: |
@@ -25,8 +25,8 @@
 ---
 Motors:
 
-* **OUT1/OUT2** → left motors (2 motors in parallel)
-* **OUT3/OUT4** → right motors (2 motors in parallel)
+* **OUT1/OUT2** -> left motors (2 motors in parallel)
+* **OUT3/OUT4** -> right motors (2 motors in parallel)
 ---
 ### Ultrasonic HC-SR04
 
@@ -50,3 +50,15 @@ Motors:
 | D6     | A2                  | 
 | D7     | A3                  | 
 
+---
+
+Bluetooth Wiring:
+
+HC-05 VCC -> Arduino 5V
+
+HC-05 GND -> Arduino GND
+
+HC-05 TXD -> Arduino D0 (PD0)
+
+HC-05 RXD <- Arduino D1 (PD1) via resistor divider (Arduino TX = 5V, HC-05 RX expects ~3.3V).
+Example divider: 1.8kΩ from D1 to node, 3.3kΩ from node to GND -> node to HC-05 RXD.

@@ -8,7 +8,7 @@
 
 #define TWO_PI 6.28318530
 
-// Motor pins - FIXED FOR YOUR WIRING
+// Motor pins
 #define ENA     PB1  // D9 (OC1A)
 #define ENB     PB2  // D10 (OC1B)
 
@@ -17,7 +17,7 @@
 #define IN3     PD5  // D5
 #define IN4     PD6  // D6
 
-// Ultrasonic pins - FIXED FOR YOUR WIRING
+// Ultrasonic pins
 #define TRIG_PIN PB4 // D12
 #define ECHO_PIN PB3 // D11
 
@@ -26,8 +26,9 @@ const unsigned long pwmCycleMs = 2000UL;
 const uint8_t pwmMin = 0;
 const uint8_t pwmMax = 200;
 const unsigned long sampleIntervalMs = 10UL;
+volatile uint8_t currentPwmMax = 200;  // runtime-adjustable speed
 
-/* LCD Pin Definitions (4-bit) - FIXED FOR YOUR WIRING */
+/* LCD Pin Definitions (4-bit) */
 // RS = D2 = PD2
 // E  = D7 = PD7
 #define LCD_RS_PIN    PD2
@@ -55,6 +56,8 @@ void init_usart(void);
 void usart_transmit(unsigned char data);
 void usart_print_string(const char* str);
 void usart_print_float(float value);
+int usart_receive_nonblocking(void);
+void usart_flush_input(void);
 void floatToString(float value, char* str, int precision);
 
 /* --------------------------------------------------------------------- */
@@ -146,6 +149,7 @@ void motor_init(void) {
     OCR1A = 0;
     OCR1B = 0;
 
+    // 8-bit Fast PWM (WGM10 + WGM12), non-inverting on OC1A/OC1B, prescaler=8 (CS11)
     TCCR1A = (1 << WGM10) | (1 << COM1A1) | (1 << COM1B1);
     TCCR1B = (1 << WGM12) | (1 << CS11);
 }
@@ -159,7 +163,7 @@ uint8_t generateSinePWM(unsigned long tMs, unsigned long cycleMs, uint8_t minVal
     double angle = TWO_PI * (double)phaseT;
     double s = sin(angle);
     float normalized = (float)((s * 0.5) + 0.5);
-    float pwmF = minVal + normalized * (float)(maxVal - minVal);
+    float pwmF = minVal + normalized * (float)(currentPwmMax - minVal);
     if (pwmF < 0.0f) pwmF = 0.0f;
     if (pwmF > 255.0f) pwmF = 255.0f;
     return (uint8_t)(pwmF + 0.5f);
@@ -234,14 +238,21 @@ float measure_distance(void) {
 }
 
 /* --------------------------------------------------------------------- */
-/* USART functions (TX only)                                             */
+/* USART functions (TX + RX)                                             */
 /* --------------------------------------------------------------------- */
 
 void init_usart(void) {
+    // PD1 is TX (we keep it as output). PD0 is RX (input by default).
     DDRD |= (1 << PD1);
+
+    // Baud 9600 (assuming 16MHz): UBRR0 = 103
     UBRR0H = 0;
     UBRR0L = 103;
-    UCSR0B = (1 << TXEN0);
+
+    // Enable TX and RX
+    UCSR0B = (1 << TXEN0) | (1 << RXEN0);
+
+    // Asynchronous, 8-bit, no parity
     UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
 }
 
@@ -280,6 +291,22 @@ void usart_print_float(float value) {
     usart_transmit('0' + (frac_part % 10));
 }
 
+// Non-blocking receive: returns -1 if no data, otherwise returns received byte (0-255)
+int usart_receive_nonblocking(void) {
+    if (UCSR0A & (1 << RXC0)) {
+        return UDR0;
+    }
+    return -1;
+}
+
+void usart_flush_input(void) {
+    // Read and discard anything in the receive buffer
+    while (UCSR0A & (1 << RXC0)) {
+        volatile uint8_t tmp = UDR0;
+        (void)tmp;
+    }
+}
+
 void floatToString(float value, char* str, int precision) {
     snprintf(str, 20, "%.*f", precision, value);
 }
@@ -295,34 +322,79 @@ int main(void) {
     lcd_init();
     float dist;
 
+    // Make sure no leftover bytes confuse startup
+    usart_flush_input();
+
     while (1) {
-        runWithGeneratedPWM(2000UL, true, true, 0.5f);
-        _delay_ms(100);
+        // Check for Bluetooth command (non-blocking)
+        int incoming = usart_receive_nonblocking();
+        if (incoming != -1) {
+            char cmd = (char)incoming;
+            if (cmd >= 'a' && cmd <= 'z') cmd = cmd - 'a' + 'A';
 
-        float d1 = measure_distance();
-        usart_print_float(d1);
-        usart_print_string(" cm (after forward)\n");
+            // Speed control
+            if (cmd >= '0' && cmd <= '9') {
+                uint8_t level = cmd - '0';
+                currentPwmMax = (uint8_t)((level * pwmMax) / 9);
+            }
 
+            switch (cmd) {
+                case 'F':
+                    runWithGeneratedPWM(2000UL, true, true, 0.5f);
+                    break;
+                case 'B':
+                    runWithGeneratedPWM(2000UL, false, false, 0.5f);
+                    break;
+                case 'L':
+                    runWithGeneratedPWM(2000UL, false, true, 0.5f);
+                    break;
+                case 'R':
+                    runWithGeneratedPWM(2000UL, true, false, 0.5f);
+                    break;
+                case 'S':
+                    OCR1A = 0;
+                    OCR1B = 0;
+                    break;
+                default:
+                    break;
+            }
+        } else {
+            // No Bluetooth command -> autonomous behavior
+            // runWithGeneratedPWM(2000UL, true, true, 0.5f);
+            // _delay_ms(100);
+
+            float d1 = measure_distance();
+            usart_print_float(d1);
+            // usart_print_string(" cm (after forward)\n");
+
+            _delay_ms(500);
+
+            // runWithGeneratedPWM(2000UL, false, false, 0.5f);
+            // _delay_ms(100);
+
+            float d2 = measure_distance();
+            usart_print_float(d2);
+            // usart_print_string(" cm (after reverse)\n");
+
+            // _delay_ms(1000);
+
+            dist = measure_distance();
+            send_command(1);
+            send_string("Dist: ");
+            char dist_str[10];
+            floatToString(dist, dist_str, 2);
+            send_string(dist_str);
+            send_string(" cm");
+
+            _delay_ms(1000);
+        }
+        
+        _delay_ms(500);
+        send_command(0xC0); // second line
+        send_string("SPD: ");
+        SendData('0' + (currentPwmMax * 9) / pwmMax);
         _delay_ms(500);
 
-        runWithGeneratedPWM(2000UL, false, false, 0.5f);
-        _delay_ms(100);
-
-        float d2 = measure_distance();
-        usart_print_float(d2);
-        usart_print_string(" cm (after reverse)\n");
-
-        _delay_ms(1000);
-
-        dist = measure_distance();
-        send_command(1);
-        send_string("Dist: ");
-        char dist_str[10];
-        floatToString(dist, dist_str, 2);
-        send_string(dist_str);
-        send_string(" cm");
-
-        _delay_ms(1000);
     }
 
     return 0;
