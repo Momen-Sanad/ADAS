@@ -62,3 +62,22 @@ HC-05 TXD -> Arduino D0 (PD0)
 
 HC-05 RXD <- Arduino D1 (PD1) via resistor divider (Arduino TX = 5V, HC-05 RX expects ~3.3V).
 Example divider: 1.8kΩ from D1 to node, 3.3kΩ from node to GND -> node to HC-05 RXD.
+
+---
+
+door switches:
+
+A0 ──[SWITCH1]──[SWITCH2]── GND
+
+
+headlights:
+
+just ditch LEDs lmao
+
+5V
+ │
+[Photoresistor]
+ │─────── -> A1
+[10kΩ resistor]
+ │
+GND

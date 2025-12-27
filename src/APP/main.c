@@ -30,14 +30,16 @@ const unsigned long sampleIntervalMs = 10UL;
 /* Runtime-adjustable speed (0..pwmMax). Default to pwmMax */
 volatile uint8_t currentPwmMax = pwmMax;
 
-/* MAX_SPEED_M_S: linear speed (m/s) at currentPwmMax == pwmMax
-   DECEL_M_S2: braking deceleration magnitude (m/s^2) when braking */
+/* Physical model assumptions for TTC (tune these) */
 const float MAX_SPEED_M_S = 0.60f;   // adjust to measured top speed (m/s)
 const float DECEL_M_S2    = 1.50f;   // adjust to measured braking deceleration (m/s^2)
-#define UTURN_DURATION_MS 1100UL     // Duration (ms) needed for ~180° rotation (tune it too)
 
 /* Track current motion: 0=stop, 1=forward, -1=backward, 2=turning */
 volatile int8_t currentMotion = 0;
+
+/* lever and photo-LED pins (A0 / A1) on PORTC */
+#define LEVERS_PIN    PC0  // A0
+#define PHOTO_LED_PIN PC1  // A1
 
 /* LCD Pin Definitions (4-bit) */
 // RS = D2 = PD2
@@ -70,6 +72,9 @@ void usart_print_float(float value);
 int usart_receive_nonblocking(void);
 void usart_flush_input(void);
 void floatToString(float value, char* str, int precision);
+
+/* Init inputs for levers/photo-LED */
+void inputs_init(void);
 
 /* --------------------------------------------------------------------- */
 /* LCD code (4-bit HD44780)                                              */
@@ -334,6 +339,20 @@ void floatToString(float value, char* str, int precision) {
 }
 
 /* --------------------------------------------------------------------- */
+/* Init input pins for lever/photo-LED                                   */
+/* --------------------------------------------------------------------- */
+void inputs_init(void) {
+    // LEVERS_PIN (A0 / PC0) as input with internal pull-up.
+    // Assumes two toggles are wired in series connecting A0 to GND when both ON.
+    DDRC &= ~(1 << LEVERS_PIN); // input
+    PORTC |=  (1 << LEVERS_PIN); // enable pull-up
+
+    // PHOTO_LED_PIN (A1 / PC1) as input, no pull-up; expects external circuit to drive it HIGH when LED lit.
+    DDRC &= ~(1 << PHOTO_LED_PIN); // input
+    PORTC &= ~(1 << PHOTO_LED_PIN); // no pull-up
+}
+
+/* --------------------------------------------------------------------- */
 /* Helper: compute TTC and stopping metrics and print them               */
 /* --------------------------------------------------------------------- */
 void compute_and_report_ttc(float dist_cm) {
@@ -372,10 +391,9 @@ void compute_and_report_ttc(float dist_cm) {
         usart_print_string("TTC_no_brake: ");
         usart_print_float(ttc_no_brake);
         usart_print_string(" s  ");
-    } 
-    else
+    } else {
         usart_print_string("TTC_no_brake: inf  ");
-    
+    }
 
     usart_print_string("t_stop: ");
     usart_print_float(t_stop);
@@ -391,21 +409,57 @@ void compute_and_report_ttc(float dist_cm) {
     }
 }
 
+
 /* --------------------------------------------------------------------- */
 /* Main program                                                          */
 /* --------------------------------------------------------------------- */
-
 int main(void) {
     motor_init();
     ultrasonic_init();
     init_usart();
     lcd_init();
+    inputs_init(); // initialize A0 / A1
+
     float dist;
 
     // Make sure no leftover bytes confuse startup
     usart_flush_input();
 
+    // Persistent motor state variables
+    bool motorA_on = false;
+    bool motorB_on = false;
+    bool motorA_forward = true; // direction if on
+    bool motorB_forward = true;
+
     while (1) {
+        // Read inputs
+        bool photoLedOn = (PINC & (1 << PHOTO_LED_PIN)) ? true : false;
+        // LEVERS_PIN uses internal pull-up; when both toggles in series are ON, pin is pulled to GND -> LOW
+        bool levers_active = ((PINC & (1 << LEVERS_PIN)) == 0);
+
+        // Update LCD second line with light status
+        send_command(0xC0); // second line
+        if (photoLedOn) {
+            send_string("Light: ON  "); // padded to overwrite previous text
+        } else {
+            send_string("Light: OFF ");
+        }
+
+        if (!levers_active) {
+            // Not allowed to run: show waiting message and ensure motors stopped
+            motorA_on = motorB_on = false;
+            OCR1A = 0;
+            OCR1B = 0;
+            currentMotion = 0;
+
+            send_command(1); // clear and show waiting text
+            send_string("Waiting switches");
+            _delay_ms(300);
+            continue;
+        }
+
+        // If we reach here, levers are active -> run the normal program behavior
+
         // Check for Bluetooth command (non-blocking)
         int incoming = usart_receive_nonblocking();
         if (incoming != -1) {
@@ -417,48 +471,116 @@ int main(void) {
             if (cmd >= '0' && cmd <= '9') {
                 uint8_t level = cmd - '0'; // 0..9
                 currentPwmMax = (uint8_t)((level * pwmMax) / 9);
-                // keep currentMotion unchanged (speed adjusted)
+                // If motors already on, immediately update OCR duty
+                if (motorA_on) OCR1A = currentPwmMax;
+                if (motorB_on) OCR1B = currentPwmMax;
             }
 
             switch (cmd) {
-                case 'F': // Forward
+                case 'F': // Forward persistent
+                    motorA_forward = true;
+                    motorB_forward = true;
+                    motorA_on = true;
+                    motorB_on = true;
+                    // Set directions for forward
+                    PORTD |=  (1 << IN1);
+                    PORTD &= ~(1 << IN2);
+                    PORTD |=  (1 << IN3);
+                    PORTD &= ~(1 << IN4);
+                    // Apply PWM duty (persistent)
+                    OCR1A = currentPwmMax;
+                    OCR1B = currentPwmMax;
                     currentMotion = 1;
-                    runWithGeneratedPWM(2000UL, true, true, 0.5f);
                     break;
-                case 'B': // Backward
+
+                case 'B': // Backward persistent
+                    motorA_forward = false;
+                    motorB_forward = false;
+                    motorA_on = true;
+                    motorB_on = true;
+                    // Set directions for backward
+                    PORTD &= ~(1 << IN1);
+                    PORTD |=  (1 << IN2);
+                    PORTD &= ~(1 << IN3);
+                    PORTD |=  (1 << IN4);
+                    // Apply PWM duty (persistent)
+                    OCR1A = currentPwmMax;
+                    OCR1B = currentPwmMax;
                     currentMotion = -1;
-                    runWithGeneratedPWM(2000UL, false, false, 0.5f);
                     break;
-                case 'L': // Left: A backward, B forward
-                    currentMotion = 2;
-                    runWithGeneratedPWM(2000UL, false, true, 0.5f);
+
+                case 'L': // Left persistent: A backward, B forward (in-place turn)
+                    motorA_forward = false;
+                    motorB_forward = true;
+                    motorA_on = true;
+                    motorB_on = true;
+                    // Set directions
+                    PORTD &= ~(1 << IN1);
+                    PORTD |=  (1 << IN2);
+                    PORTD |=  (1 << IN3);
+                    PORTD &= ~(1 << IN4);
+                    // Apply PWM duty
+                    OCR1A = currentPwmMax;
+                    OCR1B = currentPwmMax;
+                    currentMotion = 2; // turning
                     break;
-                case 'R': // Right: A forward, B backward
-                    currentMotion = 2;
-                    runWithGeneratedPWM(2000UL, true, false, 0.5f);
+
+                case 'R': // Right persistent: A forward, B backward
+                    motorA_forward = true;
+                    motorB_forward = false;
+                    motorA_on = true;
+                    motorB_on = true;
+                    // Set directions
+                    PORTD |=  (1 << IN1);
+                    PORTD &= ~(1 << IN2);
+                    PORTD &= ~(1 << IN3);
+                    PORTD |=  (1 << IN4);
+                    // Apply PWM duty
+                    OCR1A = currentPwmMax;
+                    OCR1B = currentPwmMax;
+                    currentMotion = 2; // turning
                     break;
-                case 'S': // Stop
+
+                case 'S': // Stop persistent
+                    motorA_on = false;
+                    motorB_on = false;
                     OCR1A = 0;
                     OCR1B = 0;
                     currentMotion = 0;
                     break;
-                case 'U': // U-Turn (rotate ~180 degrees)
-                    // This keeps rotation angle consistent when speed changes.
-                    unsigned long scaledUTurn = (UTURN_DURATION_MS * pwmMax) / (currentPwmMax + 1);
-                    currentMotion = 2; // turning
-                    runWithGeneratedPWM(scaledUTurn, true, false, 0.5f);
+
+                case 'U': // U-turn: keep behavior as before (timed rotate)
+                    currentMotion = 2;
+                    // runWithGeneratedPWM handles its own OCR/stops at the end
+                    runWithGeneratedPWM(1100UL, true, false, 0.5f);
+                    // after runWithGeneratedPWM returns, motors are stopped inside that function
+                    motorA_on = false;
+                    motorB_on = false;
+                    currentMotion = 0;
                     break;
+
                 default:
                     // ignore unknown
                     break;
             }
             // after executing a bluetooth command, continue loop to perform ultrasonic prints/display
         }
-        // periodic distance reporting
-        // take a measurement and report TTC info
+
+        // autonomous periodic distance reporting
+        // Make sure persistent motors keep running with current duty
+        if (motorA_on) 
+            OCR1A = currentPwmMax;
+        else
+            OCR1A = 0;
+    
+        if (motorB_on) 
+            OCR1B = currentPwmMax;
+
+        else 
+            OCR1B = 0;
+        
+
         float d1 = measure_distance();
-        // Print two readings and compute TTC using the last measured distance.
-        // First measurement:
         usart_print_float(d1);
         usart_print_string(" cm\n");
 
@@ -471,7 +593,7 @@ int main(void) {
         // Final measurement for LCD and TTC computation
         dist = measure_distance();
 
-        // Clear LCD and show distance + basic info
+        // Show distance on LCD first line
         send_command(1);
         send_string("Dist: ");
         char dist_str[10];
@@ -479,10 +601,20 @@ int main(void) {
         send_string(dist_str);
         send_string(" cm");
 
+        // Update second line with light status again (since we cleared display)
+        send_command(0xC0);
+        
+        if (photoLedOn) 
+            send_string("Light: ON  ");
+        
+        else
+            send_string("Light: OFF ");
+
         // compute and report TTC info over serial
         compute_and_report_ttc(dist);
 
         _delay_ms(1000);
+    
     }
 
     return 0;
